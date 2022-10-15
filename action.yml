@@ -1,0 +1,86 @@
+name: publish-ecr
+description: Build docker image and push it to ECR repository
+inputs:
+  image-name:
+    description: Image name for deploying
+    required: true
+  task-definition:
+    description: Task definition file to fill in an image 
+    required: true
+  container-name:
+    description: Container name to use with an image
+    required: true
+  aws-region:
+    description: AWS region for loading AWS credentials
+    required: false
+    default: 'us-east-1'
+  aws-account-id:
+    description: AWS account id
+    required: true
+  aws-access-key-id:
+    description: AWS access key
+    required: true
+  aws-secret-access-key:
+    description: AWS secret key
+    required: true
+
+outputs:
+  task-definition:
+    description: ECS task definition file
+    value: ${{ steps.task-def.outputs.task-definition }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Cache Docker layers
+      uses: actions/cache@v3.0.11
+      with:
+        path: /tmp/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        role-to-assume: arn:aws:iam::${{ inputs.aws-account-id }}:role/ExternalManager
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+        role-skip-session-tagging: true
+        role-duration-seconds: 3600
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1.5.1
+
+    - name: Build and push to Amazon ECR
+      uses: docker/build-push-action@v3
+      with:
+        context: .
+        push: true
+        target: builder
+        tags: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.image-name }}:${{ github.sha }}
+        cache-from: type=local,src=/tmp/.buildx-cache
+        cache-to: type=local,dest=/tmp/.buildx-cache-new
+
+      # This ugly bit is necessary if you don't want your cache to grow forever till it hits GitHub's limit of 5GB.
+      # https://github.com/docker/build-push-action/issues/252
+      # https://github.com/moby/buildkit/issues/1896
+    - name: Move cache
+      shell: sh
+      run: |
+        rm -rf /tmp/.buildx-cache
+        mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+    - name: Fill in the new image ID in the ECS task definition
+      id: task-def
+      uses: aws-actions/amazon-ecs-render-task-definition@v1
+      with:
+        task-definition: ${{ inputs.task-definition }}
+        container-name: ${{ inputs.container-name }}
+        image: ${{ steps.login-ecr.outputs.registry }}/${{ inputs.image-name }}:${{ github.sha }}
+
